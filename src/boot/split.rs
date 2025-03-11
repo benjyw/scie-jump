@@ -37,58 +37,18 @@ fn executable_permissions() -> Option<Permissions> {
     Some(Permissions::from_mode(0o755))
 }
 
-struct ChosenFiles {
-    files: HashSet<String>,
-}
-
-impl ChosenFiles {
-    fn new() -> Self {
-        Self {
-            files: HashSet::new(),
-        }
-    }
-
-    fn add(&mut self, file: String) {
-        self.files.insert(file);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.files.is_empty()
-    }
-
-    fn contains(&self, name: &str) -> bool {
-        self.files.is_empty() || self.files.contains(name)
-    }
-
-    fn selected<'b, 'a: 'b>(&'a self, file: &'b File) -> Option<Option<&'b String>> {
-        if self.files.is_empty() {
-            Some(None)
-        } else if self.files.contains(file.name.as_str()) {
-            Some(Some(&file.name))
-        } else if file
-            .key
-            .as_ref()
-            .map(|key| self.files.contains(key))
-            .unwrap_or(false)
-        {
-            Some(file.key.as_ref())
-        } else {
-            None
-        }
-    }
-}
-
 pub(crate) fn split(jump: Jump, mut lift: Lift, scie_path: PathBuf) -> ExitResult {
-    let mut extra_args_seen = false;
     let mut dry_run = false;
-    let mut chosen_files = ChosenFiles::new();
+    let mut chosen_files = None;
     let mut custom_base: Option<PathBuf> = None;
     for arg in env::args().skip(1) {
         match arg.as_str() {
-            "-n" | "--dry-run" if !extra_args_seen => dry_run = true,
-            "--" => extra_args_seen = true,
-            _ if extra_args_seen => {
-                chosen_files.add(arg);
+            "-n" | "--dry-run" if chosen_files.is_none() => dry_run = true,
+            "--" => chosen_files = Some(HashSet::new()),
+            _ if chosen_files.is_some() => {
+                if let Some(cf) = &mut chosen_files {
+                    cf.insert(arg);
+                }
             }
             path => {
                 if let Some(custom) = custom_base {
@@ -132,7 +92,34 @@ pub(crate) fn split(jump: Jump, mut lift: Lift, scie_path: PathBuf) -> ExitResul
         })?;
     }
 
-    if chosen_files.contains("scie-jump") {
+    fn contains(chosen_files: &Option<HashSet<String>>, s: &str) -> bool {
+        if let Some(cf) = chosen_files {
+            cf.contains(s)
+        } else {
+            true
+        }
+    }
+
+    fn selected<'b, 'a: 'b>(chosen_files: &'a Option<HashSet<String>>, file: &'b File) -> Option<&'b String> {
+        if let Some(cf) = &chosen_files {
+            if cf.contains(file.name.as_str()) {
+                Some(&file.name)
+            } else if file
+                .key
+                .as_ref()
+                .map(|key| cf.contains(key))
+                .unwrap_or(false)
+            {
+                file.key.as_ref()
+            } else {
+                None
+            }
+        } else {
+            Some(&file.name)
+        }
+    }
+
+    if contains(&chosen_files, "scie-jump") {
         if dry_run {
             println!(
                 "{path} {size} executable",
@@ -167,12 +154,12 @@ pub(crate) fn split(jump: Jump, mut lift: Lift, scie_path: PathBuf) -> ExitResul
             continue;
         } else if file.size == 0 {
             have_scie_tote = true;
-        } else if (file.file_type == FileType::Directory && chosen_files.selected(file).is_some())
+        } else if (file.file_type == FileType::Directory && selected(&chosen_files, file).is_some())
             || (index == scie_tote_index && have_scie_tote)
         {
             let mut zip_archive = open_embedded_zip(&mut scie, offset as u64, file)?;
-            if chosen_files.is_empty()
-                || (file.file_type == FileType::Directory && chosen_files.selected(file).is_some())
+            if chosen_files.is_none()
+                || (file.file_type == FileType::Directory && selected(&chosen_files, file).is_some())
             {
                 if dry_run && file.file_type == FileType::Directory {
                     print_directory_entry(&base, &zip_archive, file);
@@ -212,9 +199,7 @@ pub(crate) fn split(jump: Jump, mut lift: Lift, scie_path: PathBuf) -> ExitResul
                 }
             } else {
                 for file in lift.files.iter() {
-                    if let Some(maybe_selected_file) = chosen_files.selected(file) {
-                        let selected_file =
-                            maybe_selected_file.expect("Split files were selected.");
+                    if let Some(selected_file) = selected(&chosen_files, file) {
                         let mut src = zip_archive.by_name(file.name.as_str()).map_err(|e| {
                             Code::FAILURE.with_message(format!(
                                 "The selected file {selected_file} could not be found in this \
@@ -238,7 +223,7 @@ pub(crate) fn split(jump: Jump, mut lift: Lift, scie_path: PathBuf) -> ExitResul
                     }
                 }
             }
-        } else if chosen_files.selected(file).is_some() {
+        } else if selected(&chosen_files, file).is_some() {
             if dry_run && file.file_type == FileType::Directory {
                 let zip_archive = open_embedded_zip(&mut scie, offset as u64, file)?;
                 print_directory_entry(&base, &zip_archive, file);
@@ -267,7 +252,7 @@ pub(crate) fn split(jump: Jump, mut lift: Lift, scie_path: PathBuf) -> ExitResul
         offset += file.size;
     }
 
-    if chosen_files.contains("lift.json") {
+    if contains(&chosen_files, "lift.json") {
         if have_scie_tote {
             let scie_tote = lift.files.remove(scie_tote_index);
             let start = scie.seek(SeekFrom::Start(jump.size as u64)).map_err(|e| {
